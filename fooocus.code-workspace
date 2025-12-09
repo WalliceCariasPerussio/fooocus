@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"path": ".",
+			"name": "Fooocus Root"
+		},
+		{
+			"path": "./WebUI",
+			"name": "Fooocus WebUI"
+		}
+	],
+	"settings": {}
+}

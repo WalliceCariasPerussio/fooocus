@@ -55,6 +55,10 @@ class AsyncTask:
         self.inpaint_input_image = args.pop()
         self.inpaint_additional_prompt = args.pop()
         self.inpaint_mask_image_upload = args.pop()
+        self.lora_training_input_image = args.pop()
+        self.lora_training_character_name = args.pop()
+        self.lora_training_emotions = args.pop()
+        self.lora_training_positions = args.pop()
 
         self.disable_preview = args.pop()
         self.disable_intermediate_results = args.pop()
@@ -336,6 +340,20 @@ def worker():
 
     def save_and_log(async_task, height, imgs, task, use_expansion, width, loras, persist_image=True) -> list:
         img_paths = []
+        
+        # Check if this is LoRA Training and use character name folder
+        custom_output_folder = None
+        if async_task.current_tab == 'lora_training' and async_task.lora_training_character_name:
+            import re
+            # Sanitize character name for folder name (remove invalid characters)
+            character_name = re.sub(r'[<>:"/\\|?*]', '_', async_task.lora_training_character_name.strip())
+            if character_name:
+                # Keep behavior aligned with private_logger.log(): if we're not persisting, save under temp_path.
+                base_out = modules.config.temp_path if not persist_image else modules.config.path_outputs
+                custom_output_folder = os.path.join(base_out, 'lora_training', character_name)
+                os.makedirs(custom_output_folder, exist_ok=True)
+                print(f'[LoRA Training] Saving images to folder: {custom_output_folder}')
+        
         for x in imgs:
             d = [('Prompt', 'prompt', task['log_positive_prompt']),
                  ('Negative Prompt', 'negative_prompt', task['log_negative_prompt']),
@@ -389,7 +407,8 @@ def worker():
             d.append(('Metadata Scheme', 'metadata_scheme',
                       async_task.metadata_scheme.value if async_task.save_metadata_to_images else async_task.save_metadata_to_images))
             d.append(('Version', 'version', 'Fooocus v' + fooocus_version.version))
-            img_paths.append(log(x, d, metadata_parser, async_task.output_format, task, persist_image))
+            
+            img_paths.append(log(x, d, metadata_parser, async_task.output_format, task, persist_image, output_dir=custom_output_folder))
 
         return img_paths
 
@@ -754,6 +773,183 @@ def worker():
                 t['uc'] = pipeline.clip_encode(texts=t['negative'], pool_top_k=t['negative_top_k'])
         return tasks, use_expansion, loras, current_progress
 
+    def process_lora_training(async_task, base_model_additional_loras, use_expansion, use_style, use_synthetic_refiner,
+                             current_progress, advance_progress=False):
+        """
+        Build per-image tasks for LoRA training.
+
+        IMPORTANT: We must NOT rely on multi-line prompt/negative_prompt here because `process_prompt()` treats
+        extra lines as additional workloads (applied to every image), not "one prompt per image".
+        """
+        from itertools import product
+
+        emotions = async_task.lora_training_emotions if async_task.lora_training_emotions else ['neutral']
+        positions = async_task.lora_training_positions if async_task.lora_training_positions else ['standing']
+        # Use Settings -> Image Number as "images per combination"
+        count_per_combination = max(1, int(async_task.image_number))
+
+        combinations = list(product(emotions, positions))
+        total_images = len(combinations) * count_per_combination
+        async_task.image_number = total_images
+
+        base_prompt = safe_str(async_task.prompt)
+        base_negative = safe_str(async_task.negative_prompt)
+
+        # Encourage clothing variation (training dataset benefits from varied outfits)
+        if "same clothes" not in base_negative.lower() and "same outfit" not in base_negative.lower():
+            base_negative = (base_negative + ", " if base_negative else "") + "same clothes, same outfit, identical clothing"
+
+        if base_prompt == '':
+            use_expansion = False
+
+        if advance_progress:
+            current_progress += 1
+        progressbar(async_task, current_progress, 'Loading models ...')
+
+        lora_filenames = modules.util.remove_performance_lora(modules.config.lora_filenames, async_task.performance_selection)
+        loras, base_prompt = parse_lora_references_from_prompt(
+            base_prompt,
+            async_task.loras,
+            modules.config.default_max_lora_number,
+            lora_filenames=lora_filenames
+        )
+        loras += async_task.performance_loras
+
+        pipeline.refresh_everything(
+            refiner_model_name=async_task.refiner_model_name,
+            base_model_name=async_task.base_model_name,
+            loras=loras,
+            base_model_additional_loras=base_model_additional_loras,
+            use_synthetic_refiner=use_synthetic_refiner,
+            vae_name=async_task.vae_name
+        )
+        pipeline.set_clip_skip(async_task.clip_skip)
+
+        if advance_progress:
+            current_progress += 1
+        progressbar(async_task, current_progress, 'Processing LoRA training prompts ...')
+
+        # Emotion -> automatic trigger injection
+        EMOTION_TRIGGERS = {
+            'happy': ['cinematic expression', 'Smile', 'happy'],
+            'sad': ['cinematic expression', 'Cry', 'Sad', 'crying'],
+            'angry': ['cinematic expression', 'Angry', 'angry'],
+            'surprised': ['cinematic expression', 'surprised', 'Shocked'],
+            'neutral': ['cinematic expression', 'Serious'],
+            'excited': ['cinematic expression', 'Smiling', 'happy'],
+            'calm': ['cinematic expression', 'Serious', 'calm'],
+            'confused': ['cinematic expression', 'WTF', 'confused']
+        }
+
+        # Position -> phrase
+        POSITION_PHRASES = {
+            'standing': 'standing',
+            'sitting': 'sitting',
+            'lying': 'lying down',
+            'walking': 'walking',
+            'running': 'running',
+            'jumping': 'jumping',
+            'dancing': 'dancing',
+            'arms_up': 'arms up',
+            'arms_down': 'arms down',
+            'turned_left': 'turned left, left profile',
+            'turned_right': 'turned right, right profile',
+            'front_view': 'front view',
+            'side_view': 'side view, profile'
+        }
+
+        tasks = []
+        for i in range(total_images):
+            if async_task.disable_seed_increment:
+                task_seed = async_task.seed % (constants.MAX_SEED + 1)
+            else:
+                task_seed = (async_task.seed + i) % (constants.MAX_SEED + 1)
+
+            combo = combinations[i // count_per_combination]
+            emotion, position = combo[0], combo[1]
+
+            # Build per-image prompt with automatic trigger injection
+            e_trigs = EMOTION_TRIGGERS.get(str(emotion).lower(), [str(emotion)])
+            p_phrase = POSITION_PHRASES.get(str(position).lower(), str(position))
+
+            # base prompt + emotion triggers + pose phrase
+            combined_prompt = f"{base_prompt}, {', '.join(e_trigs)}, {p_phrase}".strip(", ")
+
+            task_rng = random.Random(task_seed)
+            task_prompt = apply_wildcards(combined_prompt, task_rng, i, async_task.read_wildcards_in_order)
+            task_prompt = apply_arrays(task_prompt, i)
+
+            task_negative_prompt = apply_wildcards(base_negative, task_rng, i, async_task.read_wildcards_in_order)
+
+            positive_basic_workloads = []
+            negative_basic_workloads = []
+
+            task_styles = async_task.style_selections.copy()
+            if use_style:
+                placeholder_replaced = False
+                for j, s in enumerate(task_styles):
+                    if s == random_style_name:
+                        s = get_random_style(task_rng)
+                        task_styles[j] = s
+                    p, n, style_has_placeholder = apply_style(s, positive=task_prompt)
+                    if style_has_placeholder:
+                        placeholder_replaced = True
+                    positive_basic_workloads = positive_basic_workloads + p
+                    negative_basic_workloads = negative_basic_workloads + n
+
+                if not placeholder_replaced:
+                    positive_basic_workloads = [task_prompt] + positive_basic_workloads
+            else:
+                positive_basic_workloads.append(task_prompt)
+
+            negative_basic_workloads.append(task_negative_prompt)
+
+            positive_basic_workloads = remove_empty_str(positive_basic_workloads, default=task_prompt)
+            negative_basic_workloads = remove_empty_str(negative_basic_workloads, default=task_negative_prompt)
+
+            tasks.append(dict(
+                task_seed=task_seed,
+                task_prompt=task_prompt,
+                task_negative_prompt=task_negative_prompt,
+                positive=positive_basic_workloads,
+                negative=negative_basic_workloads,
+                expansion='',
+                c=None,
+                uc=None,
+                positive_top_k=len(positive_basic_workloads),
+                negative_top_k=len(negative_basic_workloads),
+                log_positive_prompt=task_prompt,
+                log_negative_prompt=task_negative_prompt,
+                styles=task_styles
+            ))
+
+        if use_expansion:
+            if advance_progress:
+                current_progress += 1
+            for i, t in enumerate(tasks):
+                progressbar(async_task, current_progress, f'Preparing Fooocus text #{i + 1} ...')
+                expansion = pipeline.final_expansion(t['task_prompt'], t['task_seed'])
+                print(f'[Prompt Expansion] {expansion}')
+                t['expansion'] = expansion
+                t['positive'] = copy.deepcopy(t['positive']) + [expansion]
+
+        if advance_progress:
+            current_progress += 1
+        for i, t in enumerate(tasks):
+            progressbar(async_task, current_progress, f'Encoding positive #{i + 1} ...')
+            t['c'] = pipeline.clip_encode(texts=t['positive'], pool_top_k=t['positive_top_k'])
+
+        if advance_progress:
+            current_progress += 1
+        for i, t in enumerate(tasks):
+            if abs(float(async_task.cfg_scale) - 1.0) < 1e-4:
+                t['uc'] = pipeline.clone_cond(t['c'])
+            else:
+                progressbar(async_task, current_progress, f'Encoding negative #{i + 1} ...')
+                t['uc'] = pipeline.clip_encode(texts=t['negative'], pool_top_k=t['negative_top_k'])
+
+        return tasks, use_expansion, loras, current_progress
+
     def apply_freeu(async_task):
         print(f'FreeU is enabled!')
         pipeline.final_unet = core.apply_freeu(
@@ -930,6 +1126,37 @@ def worker():
             goals.append('enhance')
             skip_prompt_processing = True
             async_task.enhance_input_image = HWC3(async_task.enhance_input_image)
+        if async_task.current_tab == 'lora_training' and async_task.lora_training_input_image is not None:
+            goals.append('lora_training')
+            goals.append('cn')  # Add 'cn' goal to enable Image Prompt
+            async_task.lora_training_input_image = HWC3(async_task.lora_training_input_image)
+            
+            # Always use Maximum precision: FaceSwap (face) + Image Prompt (body proportions)
+            progressbar(async_task, 1, 'Preparing LoRA training image prompt ...')
+            
+            print('[LoRA Training] Using Maximum Precision: FaceSwap (face) + Image Prompt (body proportions)')
+            
+            # Face precision (defaults)
+            if len(async_task.cn_tasks[flags.cn_ip_face]) == 0:
+                async_task.cn_tasks[flags.cn_ip_face].append([
+                    async_task.lora_training_input_image,
+                    flags.default_parameters[flags.cn_ip_face][0],  # stop
+                    flags.default_parameters[flags.cn_ip_face][1]   # weight
+                ])
+
+            # Body proportions (lighter weight for outfit variation)
+            if len(async_task.cn_tasks[flags.cn_ip]) == 0:
+                async_task.cn_tasks[flags.cn_ip].append([
+                    async_task.lora_training_input_image,
+                    0.6,  # stop
+                    0.5   # weight
+                ])
+
+            # Download both models
+            if len(async_task.cn_tasks[flags.cn_ip_face]) > 0:
+                clip_vision_path, ip_negative_path, ip_adapter_face_path = modules.config.downloading_ip_adapters('face')
+            if len(async_task.cn_tasks[flags.cn_ip]) > 0:
+                clip_vision_path, ip_negative_path, ip_adapter_path = modules.config.downloading_ip_adapters('ip')
         return base_model_additional_loras, clip_vision_path, controlnet_canny_path, controlnet_cpds_path, inpaint_head_model_path, inpaint_image, inpaint_mask, ip_adapter_face_path, ip_adapter_path, ip_negative_path, skip_prompt_processing, use_synthetic_refiner
 
     def prepare_upscale(async_task, goals, uov_input_image, uov_method, performance, steps, current_progress,
@@ -1157,10 +1384,23 @@ def worker():
 
         loras = async_task.loras
         if not skip_prompt_processing:
-            tasks, use_expansion, loras, current_progress = process_prompt(async_task, async_task.prompt, async_task.negative_prompt,
-                                                         base_model_additional_loras, async_task.image_number,
-                                                         async_task.disable_seed_increment, use_expansion, use_style,
-                                                         use_synthetic_refiner, current_progress, advance_progress=True)
+            if 'lora_training' in goals:
+                tasks, use_expansion, loras, current_progress = process_lora_training(
+                    async_task,
+                    base_model_additional_loras,
+                    use_expansion,
+                    use_style,
+                    use_synthetic_refiner,
+                    current_progress,
+                    advance_progress=True
+                )
+            else:
+                tasks, use_expansion, loras, current_progress = process_prompt(
+                    async_task, async_task.prompt, async_task.negative_prompt,
+                    base_model_additional_loras, async_task.image_number,
+                    async_task.disable_seed_increment, use_expansion, use_style,
+                    use_synthetic_refiner, current_progress, advance_progress=True
+                )
 
         if len(goals) > 0:
             current_progress += 1

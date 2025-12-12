@@ -380,6 +380,65 @@ with shared.gradio_root:
                         metadata_input_image.upload(trigger_metadata_preview, inputs=metadata_input_image,
                                                     outputs=metadata_json, queue=False, show_progress=True)
 
+                    with gr.Tab(label='LoRA Training', id='lora_training_tab') as lora_training_tab:
+                        with gr.Row():
+                            with gr.Column():
+                                lora_training_input_image = grh.Image(label='Reference Image', source='upload', type='numpy', show_label=False)
+                                lora_training_character_name = gr.Textbox(
+                                    label='Character Name',
+                                    placeholder='Enter character name (e.g., "Alice", "John")',
+                                    value='',
+                                    info='Images will be saved in a folder with this name'
+                                )
+                                gr.HTML('<p>Upload a reference image to generate multiple variations for LoRA training.</p>')
+                            with gr.Column():
+                                lora_training_emotions = gr.CheckboxGroup(
+                                    label='Emotions',
+                                    choices=['happy', 'sad', 'angry', 'surprised', 'neutral', 'excited', 'calm', 'confused'],
+                                    value=['happy', 'neutral', 'sad'],
+                                    info='Select emotions to generate'
+                                )
+                                lora_training_positions = gr.CheckboxGroup(
+                                    label='Body Positions',
+                                    choices=['standing', 'sitting', 'lying', 'walking', 'running', 'jumping', 'dancing', 'arms_up', 'arms_down', 'turned_left', 'turned_right', 'front_view', 'side_view'],
+                                    value=['standing', 'sitting', 'front_view', 'side_view'],
+                                    info='Select body positions to generate'
+                                )
+                                gr.HTML('<p><strong>Tip:</strong> Use <em>Settings → Image Number</em> to control how many images to generate per emotion/position combination.</p>')
+                                gr.HTML('<a href="https://github.com/lllyasviel/Fooocus/discussions" target="_blank">\U0001F4D4 Documentation</a>')
+                                gr.HTML('<p><strong>Note:</strong> Click the main "Generate" button to create LoRA training images.</p>')
+                                gr.HTML("""
+                                    <div style="margin-top: 10px; padding: 10px; border: 1px solid rgba(255,255,255,0.15); border-radius: 8px;">
+                                        <h3 style="margin: 0 0 8px 0;">📌 Downloads recomendados (SDXL)</h3>
+                                        <p style="margin: 0 0 8px 0;">
+                                            Coloque os arquivos em <code>models/loras/</code> (LoRA) ou <code>models/embeddings/</code> (Embedding) e clique em <em>🔄 Refresh All Files</em>.
+                                            <br/>As <strong>triggers são injetadas automaticamente</strong> quando você seleciona emoções/posições nesta aba.
+                                        </p>
+
+                                        <ul style="margin: 0; padding-left: 18px;">
+                                            <li>
+                                            <strong>Facial Expressions (SDXL LoRA)</strong> —
+                                            <a href="https://civitai.com/models/541620" target="_blank" rel="noopener noreferrer">Página</a> |
+                                            <a href="https://civitai.com/api/download/models/761462" target="_blank" rel="noopener noreferrer">Download</a>
+                                            </li>
+                                            <li style="margin-top: 6px;">
+                                            <strong>Emotions XL (SDXL LoRA)</strong> —
+                                            <a href="https://civitai.com/models/309079" target="_blank" rel="noopener noreferrer">Página</a> |
+                                            <a href="https://civitai.com/api/download/models/346846" target="_blank" rel="noopener noreferrer">Download</a>
+                                            </li>
+                                            <li style="margin-top: 6px;">
+                                            <strong>Professional emotions (SDXL Embeddings)</strong> —
+                                            <a href="https://civitai.com/models/2188463" target="_blank" rel="noopener noreferrer">Página</a>
+                                            </li>
+                                            <li style="margin-top: 10px;">
+                                            <strong>Poses/olhar (SDXL Embeddings)</strong> —
+                                            <a href="https://civitai.com/models/2188463" target="_blank" rel="noopener noreferrer">mesmo pack</a>
+                                            (inclui Tilted head / Submissive gaze / Shocked)
+                                            </li>
+                                        </ul>
+                                    </div>
+                                """)
+
             with gr.Row(visible=modules.config.default_enhance_checkbox) as enhance_input_panel:
                 with gr.Tabs():
                     with gr.Tab(label='Upscale or Variation'):
@@ -552,6 +611,7 @@ with shared.gradio_root:
             describe_tab.select(lambda: 'desc', outputs=current_tab, queue=False, _js=down_js, show_progress=False)
             enhance_tab.select(lambda: 'enhance', outputs=current_tab, queue=False, _js=down_js, show_progress=False)
             metadata_tab.select(lambda: 'metadata', outputs=current_tab, queue=False, _js=down_js, show_progress=False)
+            lora_training_tab.select(lambda: 'lora_training', outputs=current_tab, queue=False, _js=down_js, show_progress=False)
             enhance_checkbox.change(lambda x: gr.update(visible=x), inputs=enhance_checkbox,
                                         outputs=enhance_input_panel, queue=False, show_progress=False, _js=switch_js)
 
@@ -985,6 +1045,7 @@ with shared.gradio_root:
         ctrls += [input_image_checkbox, current_tab]
         ctrls += [uov_method, uov_input_image]
         ctrls += [outpaint_selections, inpaint_input_image, inpaint_additional_prompt, inpaint_mask_image]
+        ctrls += [lora_training_input_image, lora_training_character_name, lora_training_emotions, lora_training_positions]
         ctrls += [disable_preview, disable_intermediate_results, disable_seed_increment, black_out_nsfw]
         ctrls += [adm_scaler_positive, adm_scaler_negative, adm_scaler_end, adaptive_cfg, clip_skip]
         ctrls += [sampler_name, scheduler_name, vae_name]

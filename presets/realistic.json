@@ -8,10 +8,10 @@
             "SDXL_FILM_PHOTOGRAPHY_STYLE_V1.safetensors",
             0.25
         ],
-        [
-            true,
-            "None",
-            1.0
+       [
+            false,
+            "facial expression style v3",
+            0.8
         ],
         [
             true,
